@@ -411,11 +411,16 @@ def _content_to_response_input_items(
       )
       message_parts.clear()
 
-  def append_assistant_text(text: str) -> None:
+  def append_assistant_text(
+      text: str, phase: Literal['commentary', 'final_answer'] | None = None
+  ) -> None:
     flush_message_parts()
-    items.append(
-        EasyInputMessageParam(type='message', role='assistant', content=text)
+    message = EasyInputMessageParam(
+        type='message', role='assistant', content=text
     )
+    if phase is not None:
+      message['phase'] = phase
+    items.append(message)
 
   for index, part in enumerate(content.parts or []):
     if part.function_response:
@@ -433,7 +438,9 @@ def _content_to_response_input_items(
       _skip_replayed_reasoning_part(part)
     elif part.text:
       if role == 'assistant':
-        append_assistant_text(part.text)
+        append_assistant_text(
+            part.text, (part.part_metadata or {}).get('openai_phase')
+        )
       else:
         message_parts.append(_text_part_to_response_content(part))
     elif part.inline_data:
@@ -564,26 +571,34 @@ def _map_finish_reason(
   return None
 
 
+def _message_text_part(text: str, phase: str | None) -> types.Part:
+  return types.Part(
+      text=text,
+      part_metadata={'openai_phase': phase} if phase is not None else None,
+  )
+
+
 def _message_content_parts(
     item: ResponseOutputMessage | Mapping[str, Any],
 ) -> list[types.Part]:
+  phase = _get_value(item, 'phase')
   parts = []
   for content in _get_value(item, 'content', []) or []:
     if isinstance(content, ResponseOutputText):
-      parts.append(types.Part.from_text(text=content.text))
+      parts.append(_message_text_part(content.text, phase))
       continue
     if isinstance(content, ResponseOutputRefusal):
-      parts.append(types.Part.from_text(text=_REFUSAL_PREFIX + content.refusal))
+      parts.append(_message_text_part(_REFUSAL_PREFIX + content.refusal, phase))
       continue
 
     content_type = _get_value(content, 'type')
     text = _get_value(content, 'text')
     if content_type == 'output_text' and text:
-      parts.append(types.Part.from_text(text=text))
+      parts.append(_message_text_part(text, phase))
     elif content_type == 'refusal':
       refusal = _get_value(content, 'refusal') or text
       if refusal:
-        parts.append(types.Part.from_text(text=_REFUSAL_PREFIX + refusal))
+        parts.append(_message_text_part(_REFUSAL_PREFIX + refusal, phase))
   return parts
 
 
@@ -785,7 +800,9 @@ class _StreamAccumulator:
       if item_type != 'reasoning':
         responses.extend(self._close_reasoning_stream(event))
       key = self._stream_output_key(event, _get_value(item, 'call_id'))
-      self._ensure_output_item(key, item_type)
+      self._ensure_output_item(key, item_type)['phase'] = _get_value(
+          item, 'phase'
+      )
       if item_type == 'function_call':
         self._track_function_call_item(key, item)
         call = self.function_calls[key]
@@ -1063,7 +1080,7 @@ class _StreamAccumulator:
       elif item_type == 'message':
         text = self._assembled_text(item, 'text')
         if text:
-          parts.append(types.Part.from_text(text=text))
+          parts.append(_message_text_part(text, item.get('phase')))
       elif item_type == 'function_call' and key in self.function_calls:
         parts.append(self._function_call_part_from_accumulator(key))
     for key in self.function_calls:
