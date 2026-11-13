@@ -30,6 +30,7 @@ import os
 import re
 from typing import Any
 from typing import cast
+from typing import ClassVar
 from typing import Literal
 from typing import TypeAlias
 
@@ -74,6 +75,8 @@ from ...models.llm_response import LlmResponse
 from ...utils import streaming_utils
 from ...utils._schema_utils import enforce_strict_openai_schema
 from ...utils._schema_utils import lowercase_schema_types
+from ._configuration_updates import ConfigurationHistory
+from ._configuration_updates import prepare_configuration_history
 
 logger = logging.getLogger('google_adk.' + __name__)
 
@@ -1126,6 +1129,8 @@ class OpenAIResponsesLlm(BaseLlm):
     sent to the backend.
   """
 
+  _uses_event_history: ClassVar[bool] = True
+
   model: str = 'gpt-5'
   api_key: str | Callable[[], str] | Callable[[], Awaitable[str]] | None = (
       Field(default=None, exclude=True, repr=False)
@@ -1150,14 +1155,34 @@ class OpenAIResponsesLlm(BaseLlm):
   async def generate_content_async(
       self, llm_request: LlmRequest, stream: bool = False
   ) -> AsyncGenerator[LlmResponse, None]:
-    kwargs = self._get_response_create_kwargs(llm_request, stream=stream)
+    kwargs = self._get_response_create_kwargs(
+        llm_request, stream=stream, build_input=False
+    )
     client = self._openai_client
+    history = None
+    if (
+        llm_request._event_history
+        and str(getattr(client, 'base_url', '')).rstrip('/')
+        == 'https://api.openai.com/v1'
+    ):
+      history = prepare_configuration_history(
+          llm_request,
+          kwargs,
+          implicit_summary=self.reasoning is None
+          and 'reasoning' not in self.extra_request_args,
+      )
+    if 'input' not in kwargs:
+      kwargs['input'] = self._get_response_input(llm_request, history)
+
     if not stream:
       response = await client.responses.create(**kwargs)
-      yield _response_to_llm_response(
+      result = _response_to_llm_response(
           response,
           include_response_metadata=self.include_response_metadata,
       )
+      if history:
+        await history.commit(result)
+      yield result
       return
 
     accumulator = _StreamAccumulator(
@@ -1169,17 +1194,20 @@ class OpenAIResponsesLlm(BaseLlm):
         yield response
     final_response = accumulator.final_response()
     if final_response:
+      if history:
+        await history.commit(final_response)
       yield final_response
 
   def _get_response_create_kwargs(
-      self, llm_request: LlmRequest, *, stream: bool
+      self, llm_request: LlmRequest, *, stream: bool, build_input: bool = True
   ) -> dict[str, Any]:
     config = llm_request.config
     kwargs: dict[str, Any] = {
         'model': llm_request.model or self.model,
-        'input': self._get_response_input(llm_request),
         'stream': stream,
     }
+    if build_input:
+      kwargs['input'] = self._get_response_input(llm_request)
     instructions = _serialize_system_instruction(config.system_instruction)
     if instructions:
       kwargs['instructions'] = instructions
@@ -1227,11 +1255,15 @@ class OpenAIResponsesLlm(BaseLlm):
     return {key: value for key, value in kwargs.items() if value is not None}
 
   def _get_response_input(
-      self, llm_request: LlmRequest
+      self, llm_request: LlmRequest, history: ConfigurationHistory | None = None
   ) -> list[_ResponsesInputItem]:
     input_items: list[_ResponsesInputItem] = []
     sanitizer = _CallIdSanitizer()
     for content in llm_request.contents or []:
+      if history:
+        if id(content) in history.skip:
+          continue
+        input_items.extend(history.before.get(id(content), ()))
       input_items.extend(_content_to_response_input_items(content, sanitizer))
     return input_items
 
@@ -1319,6 +1351,8 @@ class AzureOpenAIResponsesLlm(OpenAIResponsesLlm):
   inherited `base_url` is used verbatim as a fallback so it is not silently
   ignored.
   """
+
+  _uses_event_history: ClassVar[bool] = False
 
   azure_endpoint: str | None = None
 

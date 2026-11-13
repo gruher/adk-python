@@ -69,7 +69,9 @@ whatever happens to be there is what made ``tools_dict`` crash the wrapper, and
 a private attribute added later could hold a lock or a session just as easily.
 """
 
-_UNSNAPSHOTTED_PRIVATE: tuple[str, ...] = ()
+_UNSNAPSHOTTED_PRIVATE: tuple[str, ...] = (
+    '_event_history',  # Read-only access to the current session and source events.
+)
 """The private attributes of ``LlmRequest`` a rollback deliberately leaves.
 
 Somewhere for an attribute that must not be copied — one holding a lock, a
