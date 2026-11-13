@@ -126,8 +126,16 @@ class _ContentLlmRequestProcessor(BaseLlmRequestProcessor):
 
     agent = as_llm_agent(invocation_context)
     preserve_function_call_ids = False
+    event_contents = None
     if hasattr(agent, 'canonical_model'):
       canonical_model = agent.canonical_model
+      if getattr(type(canonical_model), '_uses_event_history', False):
+        event_contents = {}
+        llm_request._event_history = lambda: (
+            invocation_context,
+            event_contents,
+        )
+
       if (
           isinstance(canonical_model, Gemini)
           and canonical_model.use_interactions_api
@@ -165,6 +173,7 @@ class _ContentLlmRequestProcessor(BaseLlmRequestProcessor):
           node_path=invocation_context.node_path,
           is_single_turn=is_single_turn,
           user_content=invocation_context.user_content,
+          event_contents=event_contents,
           include_thoughts_from_other_agents=include_thoughts_from_other_agents,
       )
     else:
@@ -179,6 +188,7 @@ class _ContentLlmRequestProcessor(BaseLlmRequestProcessor):
           node_path=invocation_context.node_path,
           is_single_turn=is_single_turn,
           user_content=invocation_context.user_content,
+          event_contents=event_contents,
           include_thoughts_from_other_agents=False,
       )
 
@@ -472,6 +482,7 @@ def _get_contents(
     events: list[Event],
     agent_name: str = '',
     *,
+    event_contents: dict[str, types.Content] | None = None,
     preserve_function_call_ids: bool = False,
     isolation_scope: str | None = None,
     node_path: str | None = None,
@@ -645,6 +656,8 @@ def _get_contents(
               strip_client_function_call_ids=not preserve_function_call_ids,
           )
       )
+      if event_contents is not None:
+        event_contents[event.id] = contents[-1]
 
   # for scoped agents (task / single_turn), prepend a
   # synthetic user-role content built from the originating FC's args.
@@ -671,6 +684,7 @@ def _get_current_turn_contents(
     events: list[Event],
     agent_name: str = '',
     *,
+    event_contents: dict[str, types.Content] | None = None,
     preserve_function_call_ids: bool = False,
     is_single_turn: bool = False,
     isolation_scope: str | None = None,
@@ -751,6 +765,7 @@ def _get_current_turn_contents(
           current_branch,
           scoped_events[i:],
           agent_name,
+          event_contents=event_contents,
           preserve_function_call_ids=preserve_function_call_ids,
           isolation_scope=isolation_scope,
           node_path=node_path,
