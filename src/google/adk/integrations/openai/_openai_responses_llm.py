@@ -411,15 +411,13 @@ def _content_to_response_input_items(
       )
       message_parts.clear()
 
-  def append_assistant_text(
-      text: str, phase: Literal['commentary', 'final_answer'] | None = None
-  ) -> None:
+  def append_assistant_text(text: str, phase: str | None = None) -> None:
     flush_message_parts()
     message = EasyInputMessageParam(
         type='message', role='assistant', content=text
     )
     if phase is not None:
-      message['phase'] = phase
+      message['phase'] = cast(Any, phase)
     items.append(message)
 
   for index, part in enumerate(content.parts or []):
