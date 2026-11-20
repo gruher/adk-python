@@ -31,6 +31,7 @@ from pydantic import BaseModel
 if not hasattr(types, 'AvatarConfig'):
   types.AvatarConfig = type('AvatarConfig', (BaseModel,), {})
 
+from google.adk.agents import Agent
 from google.adk.integrations.openai._openai_common import OpenAIGenerateContentConfig
 from google.adk.integrations.openai._openai_responses_llm import _content_to_response_input_items
 from google.adk.integrations.openai._openai_responses_llm import _file_data_part_to_response_content
@@ -43,6 +44,7 @@ from google.adk.integrations.openai._openai_responses_llm import _tool_choice
 from google.adk.integrations.openai._openai_responses_llm import AzureOpenAIResponsesLlm
 from google.adk.integrations.openai._openai_responses_llm import OpenAIResponsesLlm
 from google.adk.models.llm_request import LlmRequest
+from google.adk.runners import InMemoryRunner
 from google.adk.utils._schema_utils import enforce_strict_openai_schema
 from openai import AsyncOpenAI
 from openai.types.responses import EasyInputMessageParam
@@ -1959,3 +1961,103 @@ def test_serialize_system_instruction_content_shaped_mapping():
 def test_serialize_system_instruction_unparseable_mapping_returns_none():
   """A mapping that fits neither Part nor Content is dropped, not raised."""
   assert _serialize_system_instruction({'not_a_field': 123}) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('initial_effort', ['low', None])
+async def test_configuration_updates_preserve_reasoning_and_schema(
+    initial_effort,
+):
+
+  class Brief(BaseModel):
+    answer: str
+
+  class Report(Brief):
+    detail: str
+
+  def configure(callback_context, llm_request):
+    if callback_context.user_content.parts[0].text == 'Go deeper':
+      llm_request.config.effort = 'high'
+      llm_request.set_output_schema(Report)
+
+  responses = mock.AsyncMock()
+  messages = ['First', 'Go deeper', 'Continue']
+  responses.create.side_effect = [
+      {
+          'id': f'resp_{i}',
+          'status': 'completed',
+          'output': [{
+              'type': 'message',
+              'content': [{'type': 'output_text', 'text': 'OK'}],
+          }],
+      }
+      for i in range(len(messages))
+  ]
+  client = mock.Mock(
+      spec=AsyncOpenAI,
+      responses=responses,
+      base_url='https://api.openai.com/v1/',
+  )
+  model = OpenAIResponsesLlm(model='gpt-6-astra', client=client)
+  agent = Agent(
+      name='writer',
+      model=model,
+      generate_content_config=OpenAIGenerateContentConfig(
+          effort=initial_effort
+      ),
+      output_schema=Brief if initial_effort else None,
+      before_model_callback=configure,
+  )
+  async with InMemoryRunner(agent=agent) as runner:
+    await runner.run_debug(messages, quiet=True)
+
+  first, second, third = [
+      call.kwargs for call in responses.create.await_args_list
+  ]
+  for request in (first, second, third):
+    if initial_effort:
+      assert (
+          request['reasoning']
+          == first['reasoning']
+          == {'effort': 'low', 'summary': 'concise'}
+      )
+      assert request['text'] == first['text']
+      assert request['text']['format']['name'] == 'Brief'
+    else:
+      assert 'reasoning' not in request and 'text' not in request
+
+  def message(text):
+    return {
+        'type': 'message',
+        'role': 'user',
+        'content': [{'type': 'input_text', 'text': text}],
+    }
+
+  answer = {'type': 'message', 'role': 'assistant', 'content': 'OK'}
+  report_schema = Report.model_json_schema()
+  enforce_strict_openai_schema(report_schema)
+  more = {
+      'type': 'configuration_update',
+      'reasoning': {'effort': 'high'},
+      'text': {
+          'format': {
+              'type': 'json_schema',
+              'name': 'Report',
+              'strict': True,
+              'schema': report_schema,
+          }
+      },
+  }
+  less = {
+      'type': 'configuration_update',
+      'reasoning': {'effort': initial_effort or 'medium'},
+      'text': first.get('text', {'format': {'type': 'text'}}),
+  }
+  assert first['input'] == [message('First')]
+  assert second['input'] == [
+      *first['input'],
+      answer,
+      more,
+      message('Go deeper'),
+  ]
+  assert third['input'] == [*second['input'], answer, less, message('Continue')]
