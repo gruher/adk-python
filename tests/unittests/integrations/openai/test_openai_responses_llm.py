@@ -959,6 +959,59 @@ def test_response_parsing_preserves_redacted_reasoning():
 
 
 @pytest.mark.asyncio
+async def test_next_request_replays_reasoning_item():
+  """A reasoning item is replayed once, in order, with its original fields."""
+  reasoning = {
+      'type': 'reasoning',
+      'id': 'rs_1',
+      'summary': [
+          {'type': 'summary_text', 'text': 'First step.'},
+          {'type': 'summary_text', 'text': 'Second step.'},
+      ],
+      'encrypted_content': 'encrypted',
+  }
+  client = _CaptureClient({
+      'id': 'resp_1',
+      'status': 'completed',
+      'output': [
+          ResponseReasoningItem(**reasoning),
+          {
+              'type': 'message',
+              'role': 'assistant',
+              'content': [{'type': 'output_text', 'text': 'Hello.'}],
+          },
+      ],
+  })
+  llm = OpenAIResponsesLlm(model='gpt-5', include_response_metadata=False)
+  llm.__dict__['_openai_client'] = client
+  request = LlmRequest(
+      contents=[types.Content(role='user', parts=[types.Part(text='Hi')])]
+  )
+
+  responses = [item async for item in llm.generate_content_async(request)]
+  request.contents.extend([
+      responses[0].content,
+      types.Content(role='user', parts=[types.Part(text='Go on')]),
+  ])
+  _ = [item async for item in llm.generate_content_async(request)]
+
+  assert client.responses.kwargs['input'] == [
+      {
+          'type': 'message',
+          'role': 'user',
+          'content': [{'type': 'input_text', 'text': 'Hi'}],
+      },
+      reasoning,
+      {'type': 'message', 'role': 'assistant', 'content': 'Hello.'},
+      {
+          'type': 'message',
+          'role': 'user',
+          'content': [{'type': 'input_text', 'text': 'Go on'}],
+      },
+  ]
+
+
+@pytest.mark.asyncio
 async def test_generate_content_async_calls_responses_create():
   """Non-streaming generation calls responses.create and parses the result."""
   response = {

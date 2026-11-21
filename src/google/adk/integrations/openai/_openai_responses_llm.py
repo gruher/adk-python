@@ -299,8 +299,8 @@ def _skip_replayed_reasoning_part(part: types.Part) -> None:
   """Skips ADK thought replay that cannot be addressed in Responses input.
 
   Responses reasoning input items must reference real reasoning item IDs from a
-  prior response. ADK thought parts do not currently carry those IDs, and
-  synthetic IDs are rejected by the API. Continuity is handled through
+  prior response. Legacy thought parts do not carry the original item, and
+  synthetic IDs are rejected by the API. Continuity can be handled through
   previous_response_id when available.
   """
   if part.thought_signature:
@@ -428,6 +428,9 @@ def _content_to_response_input_items(
       items.append(
           _function_call_to_response_item(part.function_call, sanitizer)
       )
+    elif reasoning := (part.part_metadata or {}).get('openai_reasoning'):
+      flush_message_parts()
+      items.append(reasoning)
     elif part.thought and (part.text or part.thought_signature):
       flush_message_parts()
       _skip_replayed_reasoning_part(part)
@@ -621,6 +624,10 @@ def _reasoning_parts(
   item_id = _get_value(item, 'id')
   if item_id:
     metadata['id'] = item_id
+  if not parts:
+    parts.append(types.Part(thought=True))
+  # Keep one original item per reasoning output, even with multiple summaries.
+  parts[0].part_metadata = {'openai_reasoning': _to_dict(item)}
   return parts, metadata
 
 
