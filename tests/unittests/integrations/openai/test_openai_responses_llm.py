@@ -301,6 +301,32 @@ def test_llm_request_model_overrides_self_model_for_reasoning_detection():
   assert kwargs['top_p'] == 0.9
 
 
+def test_next_request_preserves_assistant_message_phase():
+  messages = [
+      {'content': 'Checking.', 'phase': 'commentary'},
+      {'content': 'Older reply.'},
+      {'content': 'Done.', 'phase': 'final_answer'},
+  ]
+  output = [
+      {
+          **message,
+          'type': 'message',
+          'content': [{'type': 'output_text', 'text': message['content']}],
+      }
+      for message in messages
+  ]
+  response = _response_to_llm_response({'output': output})
+  request = LlmRequest(contents=[response.content])
+  kwargs = OpenAIResponsesLlm()._get_response_create_kwargs(
+      request, stream=False
+  )
+
+  assert kwargs['input'] == [
+      {'type': 'message', 'role': 'assistant', **message}
+      for message in messages
+  ]
+
+
 def test_content_mapping_preserves_model_tool_calls_and_reasoning():
   """Model tool calls/text replay while synthetic reasoning is skipped."""
   function_call_part = types.Part.from_function_call(
